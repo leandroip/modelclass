@@ -1,0 +1,20 @@
+{
+    "name": "leandroip/modelclass",
+    "description": "A class to implement PHP Models and handle basic MySql operations like insert, select, update, delete and perform search by keywords.",
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Leandro IP",
+            "email": "leandro.israel.p@gmail.com"
+        }
+    ],
+    "autoload":{
+        "psr-0":{
+            "ModelClass" : "src/"
+        }
+    },
+    "require": {
+        "php" : ">=5.3.0"
+    }
+}
