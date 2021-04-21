@@ -9,6 +9,7 @@
             "email": "leandro.israel.p@gmail.com"
         }
     ],
+    "minimum-stability": "dev",
     "autoload":{
         "psr-0":{
             "ModelClass" : "src/"
