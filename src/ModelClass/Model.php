@@ -1,7 +1,10 @@
 <?php
 
-
 namespace ModelClass;
+
+use PDO;
+use PDOException;
+use Exception;
 
 /**
  * \brief The database handler
@@ -14,7 +17,6 @@ $_dbHandle = null;
 
 /**
  * \brief The Model class
- * 
  * 
  * This class access the database and provides the main functionalities 
  * to manage the database.
@@ -40,21 +42,12 @@ class ModelMYSQL {
     /** Propriedades */
     protected $_prop; ///< The cols of the table
     protected $_proptype; ///< the type of each col
-    protected $_usehtmlentities = true;
     protected $editing = false;
-    protected $generateId = false;
+    protected $generateId = true;
     private $lastSql = "";
 
-    public function get_usehtmlentities() {
-        return $this->_usehtmlentities;
-    }
-    
     public function setGenerateId($v){
         $this->generateId = $v;
-    }
-
-    public function set_usehtmlentities($_usehtmlentities) {
-        $this->_usehtmlentities = $_usehtmlentities;
     }
 
     /**
@@ -82,17 +75,20 @@ class ModelMYSQL {
         global $_dbHandle;
         
         if ($_dbHandle == null) {
-
-            $_dbHandle = @mysqli_connect($address, $account, $pwd);
-            if ($_dbHandle) {
-                if (mysqli_select_db($_dbHandle, $name)) {
-                    return 1;
-                }
+            try {
+                $dsn = "mysql:host={$address};dbname={$name};charset=utf8mb4";
+                $options = [
+                    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                    PDO::ATTR_EMULATE_PREPARES => false,
+                    PDO::ATTR_TIMEOUT => 5
+                ];
+                
+                $_dbHandle = new PDO($dsn, $account, $pwd, $options);
+                return 1;
+            } catch (PDOException $e) {
+                throw new Exception("Erro ao conectar ao banco de dados: " . $e->getMessage());
             }
-            echo "Ops, infelizmente nosso servidor est&aacute; com 
-			algum problema. Por favor volte daqui a pouco.";
-            exit;
-            return 0;
         }
         return 1;
     }
@@ -106,12 +102,6 @@ class ModelMYSQL {
      * */
     function set($att, $val) {
         $this->_prop[$att] = $val;
-        /*
-        if($att == "id" && strlen(trim($val)) > 1){
-            $this->editing = true;
-        }
-         * 
-         */
     }
 
     /**
@@ -125,7 +115,7 @@ class ModelMYSQL {
             $this->_prop[$v["Field"]] = "";
             $this->_proptype[$v["Field"]] = $v["Type"];
         }
-
+        return $this->_prop;
         //print_r($this->_prop);
     }
     
@@ -172,23 +162,7 @@ class ModelMYSQL {
         }
     }
      
-     /*
-    function setAll($att, $isUpdate = false) {
-        if (!$this->editing or $isUpdate){        
-            $this->getProp();
-            $this->editing = true;
-        }
-        foreach ($this->_prop as $k => $v) {
-            if (isset($att[$k])) {
-                $this->_prop[$k] = $att[$k];
-                //$this->set($k, $att[$k]);
-            } else {
-                if (!$this->editing)
-                    unset($this->_prop[$k]);
-            }
-        }
-    }
-*/
+
     /**
      * \brief Get the value of a col.
      * 
@@ -211,81 +185,87 @@ class ModelMYSQL {
      * \brief Execute a custom query.
      * 
      * */
-    function query($qr) {
+    function query($qr, $params = array()) {
         global $_dbHandle;
-        $this->connect();
-        $this->lastSql = $qr;
-        $r = mysqli_query($_dbHandle, $qr);
-
-        if ($r === FALSE) {
-            print("query error");
-            echo mysqli_error($_dbHandle);
-            echo $qr;
-            die();
+        
+        try {
+            $this->connect();
+            $this->lastSql = $qr;
+            
+            $stmt = $_dbHandle->prepare($qr);
+            
+            if (!$stmt) {
+                throw new Exception("Erro ao preparar a query: " . implode(" ", $_dbHandle->errorInfo()));
+            }
+            
+            $stmt->execute($params);
+            return $stmt;
+            
+        } catch (PDOException $e) {
+            throw new Exception("Erro ao executar a operação no banco de dados: " . $e->getMessage());
         }
-        return $r;
+        return false;
     }
+
 
     function getLastSql(){
         return $this->lastSql;
     }
 
     function setTimeZone($t) {
-        return $this->query("SET time_zone = \"" . $t . "\"");
+        return $this->query("SET time_zone = ?", [$t]);
     }
 
     function getTime() {
-        return $this->query_ar("select now() as date");
+        return $this->query_ar("SELECT NOW() as date");
     }
 
-    function query_ar($qr) {
-        return $this->toArray($this->query($qr));
+    function query_ar($qr, $params = array()) {
+        return $this->toArray($this->query($qr, $params));
     }
 
     function getValueByIdCol($id, $col, $table=""){
         if($table=="") $table = $this->_table;
-        $r = $this->query_ar("SELECT $col from $table where id = '$id'");
+        $r = $this->query_ar("SELECT {$col} FROM {$table} WHERE id = ?", [$id]);
         return $r[0][$col];
     }
     function setValueByIdCol($id, $col, $val, $table = ""){
         if($table=="") $table = $this->_table;
-        return $this->query("UPDATE $table set $col='$val' where id='$id'" );
+        $stmt = $this->query("UPDATE {$table} SET {$col} = ? WHERE id = ?", [$val, $id]);
+        return $stmt->rowCount() > 0;
     }
 
     function loadBy($field, $value){
         global $_dbHandle;
         $this->connect();
-        $r = $this->query("select * from " . $this->_table . " where $field='" 
-            . mysqli_real_escape_string($_dbHandle, $value) . "'");
+        $r = $this->query("SELECT * FROM {$this->_table} WHERE {$field} = ?", [$value]);
         $data = $this->getRow($r);
         $this->_prop = array();
-        if (isset($data) and count($data) > 0 and $data != null) {
+        if ($data !== false) {
             foreach ($data as $k => $v) {
                 $this->_prop[$k] = $v;
             }
-        }else{
-            return false;
+            $this->editing = true;
+            return true;
         }
-        $this->editing = true;
-        return true;
+        return false;
     }
 
     /** Load the model by 'id' */
     function load($id) {
         global $_dbHandle;
         $this->connect();
-        $r = $this->query("select * from " . $this->_table . " where id='" . mysqli_real_escape_string($_dbHandle, $id) . "'");
+        $r = $this->query("SELECT * FROM {$this->_table} WHERE id = ?", [$id]);
         $data = $this->getRow($r);
         $this->_prop = array();
-        if (isset($data) and count($data) > 0 and $data != null) {
+        if ($data !== false) {
             foreach ($data as $k => $v) {
                 $this->_prop[$k] = $v;
             }
-        }else{
-            return false;
+            $this->editing = true;
+            return true;
         }
-        $this->editing = true;
-        return true;
+        return false;
     }
 
     function reload() {
@@ -301,59 +281,70 @@ class ModelMYSQL {
         global $_dbHandle;
 
         $sql = "";
-        $cols = "";
-        $vals = "";
-        $res = null;
-
+        $params = array();
         $op = "";
-        if (!isset($this->_prop["id"]) or $this->_prop["id"] == null or $this->_prop["id"] == '' or ! $this->editing) {
-            //$this->_prop["id"] = Date("YmdHsi").rand(0,9999)."-".rand(0,99);
+
+        // Se não tiver ID ou não estiver em modo de edição, faz INSERT
+        if (!isset($this->_prop["id"]) || $this->_prop["id"] === null || $this->_prop["id"] === '' || !$this->editing) {
             if($this->generateId){
-                if (!isset($this->_prop["id"]) or $this->_prop["id"] == null or $this->_prop["id"] == '') {
-                    $this->_prop["id"] = Date("YmdHsi") . str_pad(rand(0, 9999), 4, "0", STR_PAD_LEFT);
+                if (!isset($this->_prop["id"]) || $this->_prop["id"] === null || $this->_prop["id"] === '') {
+                    $timestamp = date('YmdHis');
+                    $random = str_pad(mt_rand(0, 9999), 4, '0', STR_PAD_LEFT);
+                    $unique = substr(uniqid('', true), -4);
+                    $this->_prop["id"] = $timestamp . $random . $unique;
                 }
-            }else{
+            } else {
+                // Remove o ID para que o banco gere automaticamente
                 unset($this->_prop["id"]);
             }
+            
             $this->connect();
-
-            foreach ($this->_prop as $k => $v) {
-                $cols = $cols . "," . mysqli_real_escape_string($_dbHandle, $k);
-                $vals = $vals . ",'" . mysqli_real_escape_string($_dbHandle, $v) . "'";
-            }
-            $cols[0] = ' ';
-            $vals[0] = ' ';
-
-            $sql = "insert into " . $this->_table . "(" . $cols . ") values(" . $vals . ")";
+            
+            $cols = array_keys($this->_prop);
+            $placeholders = array_fill(0, count($cols), '?');
+            
+            $sql = "INSERT INTO {$this->_table} (" . implode(', ', $cols) . ") VALUES (" . implode(', ', $placeholders) . ")";
+            $params = array_values($this->_prop);
             $op = "insert";
         } else {
+            // Se tiver ID e estiver em modo de edição, faz UPDATE
+            $this->connect();
+            
+            $sets = array();
             foreach ($this->_prop as $k => $v) {
-                if ($k != "id")
-                    $vals = $vals . "," . $k . "='" . $v . "'";
+                if ($k != "id") {
+                    $sets[] = "{$k} = ?";
+                    $params[] = $v;
+                }
             }
-            $vals[0] = ' ';
-            $sql = "update " . $this->_table . " set " . $vals . " where id='" . $this->_prop["id"] . "'";
+            $params[] = $this->_prop["id"];
+            $sql = "UPDATE {$this->_table} SET " . implode(', ', $sets) . " WHERE id = ?";
+            $op = "update";
         }
-        //echo $sql;
         
         if ($getsql) {
             return $sql;
         }
+        
         $this->editing = true;
-        $res = $this->query($sql);
-        if(!$this->generateId and $op=="insert"){
-                $this->_prop["id"] = $this->query_ar("select LAST_INSERT_ID() as id")[0]["id"];
+        $res = $this->query($sql, $params);
+        
+        if(!$this->generateId && $op=="insert"){
+            $newId = $_dbHandle->lastInsertId();
+            if ($newId) {
+                $this->_prop["id"] = $newId;
             }
+        }
+        
         return $res;
     }
 
     function delete($id = "") {
         if ($id == "") {
-            $sql = "delete from " . $this->_table . " where id='" . $this->_prop["id"] . "'";
+            return $this->query("DELETE FROM {$this->_table} WHERE id = ?", [$this->_prop["id"]])->rowCount() > 0;
         } else {
-            $sql = "delete from " . $this->_table . " where id='" . $id . "'";
+            return $this->query("DELETE FROM {$this->_table} WHERE id = ?", [$id])->rowCount() > 0;
         }
-        return $this->query($sql) === TRUE;
     }
 
     /**
@@ -368,7 +359,7 @@ class ModelMYSQL {
      * Conta a quantidade de registros que uma query terá como resultado.
      */
     function countSql2($sqlQuery){
-        $res = $this->query_ar("SELECT count(*) as qtd FROM ($sqlQuery) as tabbb");
+        $res = $this->query_ar("SELECT COUNT(*) as qtd FROM ({$sqlQuery}) as tabbb");
         return $res[0]["qtd"];
     }
 
@@ -377,80 +368,54 @@ class ModelMYSQL {
      * $where = ["coluna"=>"valor da coluna a ser igual"]
      */
     function count($where = null) {
-        $first = true;
-        $table = $this->_table;
-        $w = "";
+        $params = array();
+        $whereClause = "";
+        
         if ($where != null) {
+            $conditions = array();
             foreach ($where as $k => $v) {
-                if ($first) {
-                    $w = $k . "=" . "\"" . $v . "\"";
-                    $first = false;
-                } else {
-                    $w = $w . " AND " . $k . "=" . "\"" . $v . "\"";
-                }
+                $conditions[] = "{$k} = ?";
+                $params[] = $v;
             }
+            $whereClause = "WHERE " . implode(" AND ", $conditions);
         }
-        if ($where == null) {
-            $sql = "SELECT count(*) as qtd FROM $table;";
-        } else {
-            $sql = "SELECT count(*) as qtd FROM $table WHERE $w;";
-        }
-        $res = $this->toArray($this->query($sql));
-        // $i = 0;
-
+        
+        $sql = "SELECT COUNT(*) as qtd FROM {$this->_table} {$whereClause}";
+        $res = $this->toArray($this->query($sql, $params));
         return $res[0]["qtd"];
     }
 
     /** Perform a select. */
     function select($where = null, $order = null, $from = null, $count = null) {
-        $first = true;
-        $table = $this->_table;
-        if ($order != "" and $order != null)
-            $order = "order by $order";
-        $w = "";
+        $params = array();
+        $whereClause = "";
+        
         if ($where != null) {
+            $conditions = array();
             foreach ($where as $k => $v) {
-                if ($first) {
-                    $w = $k . "=" . "\"" . $v . "\"";
-                    $first = false;
-                } else {
-                    $w = $w . " AND " . $k . "=" . "\"" . $v . "\"";
-                }
+                $conditions[] = "{$k} = ?";
+                $params[] = $v;
             }
+            $whereClause = "WHERE " . implode(" AND ", $conditions);
         }
-        if ($where == null) {
-            $sql = "SELECT * FROM $table $order";
-        } else {
-            $sql = "SELECT * FROM $table WHERE $w $order";
+        
+        $orderClause = $order ? "ORDER BY {$order}" : "";
+        $limitClause = "";
+        
+        if ($count !== null) {
+            $limitClause = "LIMIT ?, ?";
+            $params[] = (int)$from;
+            $params[] = (int)$count;
         }
-
-        if ($count != null) {
-            $sql = $sql . " limit $from, $count";
-        }
-
-        $res = $this->query($sql);
+        
+        $sql = "SELECT * FROM {$this->_table} {$whereClause} {$orderClause} {$limitClause}";
+        $res = $this->query($sql, $params);
         return $this->toArray($res);
     }
 
     /** MySQL result to array */
     function toArray($res) {
-        //$res = db_execute($sql);
-        $i = 0;
-        $r = array();
-        while ($row = mysqli_fetch_array($res, MYSQLI_ASSOC)) {
-            $j = 0;
-            foreach ($row as $k => $v) {
-                if (!$this->_usehtmlentities) {
-                    $r[$i][$k] = $v;
-                } else {
-                    $r[$i][$k] = htmlspecialchars($v);
-                }
-                $j++;
-                //echo $v . "<br>";
-            }
-            $i++;
-        }
-        return $r;
+        return $res->fetchAll();
     }
 
     function prepareCaseWhenForSearch($term1, $onCols, $colWeight){
@@ -461,7 +426,8 @@ class ModelMYSQL {
             foreach($terms as $kw){
                 //$fieldSearchQueries[] = "CASE WHEN $thisField LIKE '%$kw%' THEN 1 ELSE 0 END";
                 $fieldSearchQueries[] = "IF( $thisField LIKE '%$kw%', $colWeight[$c], 0)";
-                $fieldSearchQueries[] = "IF( $thisField = '$kw', ".($colWeight[$c]*2).", 0)";
+                //$fieldSearchQueries[] = "IF( $thisField = '$kw', ".($colWeight[$c]*2).", 0)";
+                $fieldSearchQueries[] = "IF( $thisField LIKE '$kw', ".($colWeight[$c]*2).", 0)";
                 
             }
             $c++;
@@ -472,23 +438,25 @@ class ModelMYSQL {
     //. 'FROM TABLE WHERE rank > 0 ORDER BY rank';
 
     function startTransaction(){
-        $this->query("START TRANSACTION;");
-        $this->query("SET SESSION autocommit = 0;");
+        global $_dbHandle;
+        $_dbHandle->beginTransaction();
     }
 
     function commit(){
-        $this->query("COMMIT;");
+        global $_dbHandle;
+        $_dbHandle->commit();
     }
 
     function rollback(){
-        $this->query("ROLLBACK;");
+        global $_dbHandle;
+        $_dbHandle->rollBack();
     }
     
 
-    function search($term, $plainWhere = '1', $onCols = array(), $colWeight = array(), $from=null, $count = null, $onlySql=false, $orderby="", $extraTables="", $cols="", $group=""){
-        $table = $this->_table;
-        if(strlen(trim($extraTables)) > 0 and !str_starts_with($extraTables, "LEFT JOIN")){
-            $extraTables = ",".$extraTables;
+    function search($term, $fromTables, $plainWhere = '1', $onCols = array(), $colWeight = array(), $from=null, $count = null, $onlySql=false, $orderby="", $cols="", $group=""){
+        $table = $fromTables;
+        if($fromTables == NULL){
+            $table = $this->_table;
         }
 
         
@@ -509,7 +477,7 @@ class ModelMYSQL {
             $caseWhen = $this->prepareCaseWhenForSearch($term, $onCols, $colWeight);
             $order = (trim($orderby) == "") ? "" : ','.$orderby;
             
-            $sql = "SELECT * FROM (SELECT $cols, $caseWhen AS rank from $table $extraTables WHERE ($plainWhere) $group) as tab WHERE rank > 0 ORDER BY rank DESC $order";
+            $sql = "SELECT * FROM (SELECT $cols, $caseWhen AS rankk from $table WHERE ($plainWhere) $group) as tab WHERE rankk > 0 ORDER BY rankk DESC $order";
             //echo $sql;
             //die();
         }
@@ -522,537 +490,15 @@ class ModelMYSQL {
         return $this->query_ar($sql);
     }
     
-    function searchold2($term, $where = null, $onCols = null, $from=0, $count=20) {
-        $term = explode(" ", $term);
-        $terms = array();
-        foreach($term as $v){
-            array_push($terms, trim($v));
-        }
-        if($onCols == null){
-            $onCols = $this->getColumns();
-        }
-
-    }
-
-    /** Search - nao implementado */
-    function searchold($term, $where = null, $onCols = null, $from, $count) {
-        
-        if($onCols == null){
-            $onCols = $this->getColumns();
-            /*
-            foreach($myCols as $v){
-                $myCols = $myCols . ','.$v;
-            }
-            $onCols = substr($myCols,1);
-            * */
-        }
-        $first = true;
-        $table = $this->_table;
-        $w = "";
-        if ($where != null) {
-            foreach ($where as $k => $v) {
-                if ($first) {
-                    $w = $k . "=" . "\"" . $v . "\"";
-                    $first = false;
-                } else {
-                    $w = $w . " AND " . $k . "=" . "\"" . $v . "\"";
-                }
-            }
-        }
-        if ($where == null) {
-            $sql = "SELECT * FROM $table";
-        } else {
-            $sql = "SELECT *  FROM $table WHERE $w";
-        }
-
-        $s = "";
-        $first = true;
-
-        foreach ($onCols as $k => $v) {
-
-            foreach ($term as $l => $m) {
-
-                if ($first) {
-                    $s = $s . " $v LIKE '%$m%' ";
-                    $first = false;
-                } else {
-                    $s = $s . " OR $v LIKE '%$m%' ";
-                }
-            }
-        }
-        if ($s != "") {
-            $sql = $sql . " AND( " . $s . ")";
-        }
-
-
-        $tcount = count($this->toArray($this->query($sql)));
-        if ($count != null) {
-            $sql = $sql . " limit $from, $count";
-        }
-
-
-        $r = $this->toArray($this->query($sql));
-        $r["count"] = $tcount;
-        return $r;
-    }
+    
 
     /** Num of rows. */
     function getNumRows($res) {
-        return mysqli_num_rows($res);
+        return $res->rowCount();
     }
 
     function getRow($result) {
-        $row = mysqli_fetch_array($result, MYSQLI_ASSOC);
-        return $row;
-    }
-
-}
-
-
-class ModelSQLITE{
-
-    /** Propriedades */
-    protected $_prop; ///< The cols of the table
-    protected $_proptype; ///< the type of each col
-    protected $_usehtmlentities = true;
-    protected $editing = false;
-    protected $sqldb = null;
-
-    public function get_usehtmlentities() {
-        return $this->_usehtmlentities;
-    }
-
-    public function set_usehtmlentities($_usehtmlentities) {
-        $this->_usehtmlentities = $_usehtmlentities;
-    }
-
-    /**
-     * 
-     * \brief Access the database on specific table.
-     * 
-     * Accessing a specific table do means you can only manage this table.
-     * 
-     * 
-     * 
-     * */
-    function __construct($tablename = "", $sqldb = null) {
-        if ($tablename == "") {
-            $this->_model = get_class($this);
-            $this->_table = strtolower($this->_model) . "s";
-            $this->_prop = array();
-        } else {
-            $this->_model = $tablename;
-            $this->_table = $tablename;
-            $this->_prop = array();
-        }
-        
-        if($sqldb != null){
-            $this->sqldb = $sqldb;
-        }else{
-             $this->sqldb = DB_SQLITE;
-        }
-    }
-
-    function connect() {
-        global $_dbHandle;
-        //if ($_dbHandle == null) {
-            //$_dbHandle = new SQLite3($address);
-        
-                $_dbHandle = new SQLite3($this->sqldb);
-                if(!$_dbHandle){
-                    
-                }
-            
-        //}
-        return 1;
-    }
-
-    /**
-     * \brief Set a col of the table passed in @ref __construct.
-     * 
-     * \param[$att] The col.
-     * \param[$val] The value
-     * 
-     * */
-    function set($att, $val) {
-        $this->_prop[$att] = $val;
-        /*
-        if($att == "id" && strlen(trim($val)) > 1){
-            $this->editing = true;
-        }
-         * 
-         */
-    }
-
-    /**
-     * \brief Get all cols of the table passed in @ref __construct.
-     * 
-     * */
-    function getProp() {
-        $res = $this->query("PRAGMA table_info('".$this->_table."')");
-        $a = $this->toArray($res);
-        foreach ($a as $k => $v) {
-            $this->_prop[$v["name"]] = "";
-            $this->_proptype[$v["name"]] = $v["type"];
-        }
-
-        //print_r($this->_prop);
-    }
-    
-    function getColumns(){
-        $cols = array();
-        $r = $this->query_ar("PRAGMA table_info('".$this->_table."')");
-        for($i=0;$i<count($r);$i++){
-            array_push($cols, $r[$i]["name"]);
-        }
-        
-        /*
-        $res = $this->query('SHOW COLUMNS FROM ' . $this->_table);
-        $a = $this->toArray($res);
-        foreach ($a as $k => $v) {
-            array_push($cols, $v["Field"]);
-        }
-        * */
-        return $cols;
-    }
-
-    /**
-     * \brief Set all cols throuht an array which keys has the same name 
-     * of the cols.
-     * 
-     * With this function you can pass all data of the $_POST in one time.
-     * Avoiding to many call to @ref set.
-     * 
-     * You can pass all data of a form with only one line: `$m->setAll($_POST)`.
-     * 
-     * As this function is usually instantiated inside a controller, is a best practice 
-     * to use the filtered user input provided by the controller: `$m->setAll($this->_post)`.
-     * 
-     * \param[$att] The array with all the data. If a key of $att doesn't exists in the cols, it will be ignored.
-     * If $att doesn't contains all the cols, the original values of these cols will not be changed (if exists, otherwise the database will use the default).
-     * 
-     * */
-    function setAll($att) {
-        if (!$this->editing)
-            $this->getProp();
-
-        foreach ($this->_prop as $k => $v) {
-            if (isset($att[$k])) {
-                $this->_prop[$k] = $att[$k];
-                //$this->set($k, $att[$k]);
-            } else {
-                if (!$this->editing)
-                    unset($this->_prop[$k]);
-            }
-        }
-    }
-
-    /**
-     * \brief Get the value of a col.
-     * 
-     * After insuring @ref load, you can take the value of any col using this function.
-     * 
-     * */
-    function get($att) {
-        return $this->_prop[$att];
-    }
-
-    function getAll() {
-        return $this->_prop;
-    }
-    
-    function exec(){
-        global $_dbHandle;
-        $this->connect();
-        return $_dbHandle->query($qr);
-    }
-    
-    function getLastError(){
-        global $_dbHandle;
-        return $_dbHandle->lastErrorMsg();
-    }
-
-    /**
-     * 
-     * \brief Execute a custom query.
-     * 
-     * */
-    function query($qr, $dieOnError=true) {
-        global $_dbHandle;
-        $this->connect();
-        $r = $_dbHandle->query($qr);
-
-        if ($r === FALSE && $dieOnError) {
-            print("query error");
-            //echo mysqli_error($_dbHandle);
-            echo $_dbHandle->lastErrorMsg();
-            echo $qr;
-            echo "[".$this->sqldb."]";
-            die();
-        }
-        return $r;
-    }
-
-    function setTimeZone($t) {
-        return $this->query("SET time_zone = \"" . $t . "\"");
-    }
-
-    function getTime() {
-        return $this->query_ar("select now() as date");
-    }
-
-    function query_ar($qr) {
-        return $this->toArray($this->query($qr));
-    }
-
-    /** Load the model by 'id' */
-    function load($id) {
-        global $_dbHandle;
-        $this->connect();
-        $r = $this->query("select * from " . $this->_table . " where id='" . $_dbHandle->escapeString($id) . "'");
-        $data = $this->getRow($r);
-        $this->_prop = array();
-        if (isset($data) and count($data) > 0 and $data != null) {
-            foreach ($data as $k => $v) {
-                $this->_prop[$k] = $v;
-            }
-        }else{
-            return false;
-        }
-        $this->editing = true;
-        return true;
-    }
-
-    function reload() {
-        $this->load($this->get("id"));
-    }
-
-    /** Persist the model, inserting or updating if 'id' exists. */
-    function persist($getsql = false) {
-        global $_dbHandle;
-
-        $sql = "";
-        $cols = "";
-        $vals = "";
-        $res = null;
-
-
-        if (!isset($this->_prop["id"]) or $this->_prop["id"] == null or $this->_prop["id"] == '' or ! $this->editing) {
-            //$this->_prop["id"] = Date("YmdHsi").rand(0,9999)."-".rand(0,99);
-            if (!isset($this->_prop["id"]) or $this->_prop["id"] == null or $this->_prop["id"] == '') {
-                $this->_prop["id"] = Date("YmdHsi") . str_pad(rand(0, 9999), 4, "0", STR_PAD_LEFT);
-            }
-
-            foreach ($this->_prop as $k => $v) {
-                $cols = $cols . "," .  $_dbHandle->escapeString($k);
-                $vals = $vals . ",'" .  $_dbHandle->escapeString($v) . "'";
-            }
-            $cols[0] = ' ';
-            $vals[0] = ' ';
-
-            $sql = "insert into " . $this->_table . "(" . $cols . ") values(" . $vals . ")";
-        } else {
-            foreach ($this->_prop as $k => $v) {
-                if ($k != "id")
-                    $vals = $vals . "," . $k . "='" . $v . "'";
-            }
-            $vals[0] = ' ';
-            $sql = "update " . $this->_table . " set " . $vals . " where id='" . $this->_prop["id"] . "'";
-        }
-        //echo $sql;
-        
-        if ($getsql) {
-            return $sql;
-        }
-        $this->editing = true;
-        $res = $this->query($sql);
-        return $res;
-    }
-
-    function delete($id = "") {
-        if ($id == "") {
-            $sql = "delete from " . $this->_table . " where id='" . $this->_prop["id"] . "'";
-        } else {
-            $sql = "delete from " . $this->_table . " where id='" . $id . "'";
-        }
-        return $this->query($sql) === TRUE;
-    }
-
-    function count($where) {
-        $first = true;
-        $table = $this->_table;
-        $w = "";
-        if ($where != null) {
-            foreach ($where as $k => $v) {
-                if ($first) {
-                    $w = $k . "=" . "\"" . $v . "\"";
-                    $first = false;
-                } else {
-                    $w = $w . " AND " . $k . "=" . "\"" . $v . "\"";
-                }
-            }
-        }
-        if ($where == null) {
-            $sql = "SELECT count(*) as qtd FROM $table;";
-        } else {
-            $sql = "SELECT count(*) as qtd FROM $table WHERE $w;";
-        }
-        $res = $this->toArray($this->query($sql));
-        // $i = 0;
-
-        return $res[0]["qtd"];
-    }
-
-    /** Perform a select. */
-    function select($where = null, $order = null, $from = null, $count = null) {
-        $first = true;
-        $table = $this->_table;
-        if ($order != "" and $order != null)
-            $order = "order by $order";
-        $w = "";
-        if ($where != null) {
-            foreach ($where as $k => $v) {
-                if ($first) {
-                    $w = $k . "=" . "\"" . $v . "\"";
-                    $first = false;
-                } else {
-                    $w = $w . " AND " . $k . "=" . "\"" . $v . "\"";
-                }
-            }
-        }
-        if ($where == null) {
-            $sql = "SELECT * FROM $table $order";
-        } else {
-            $sql = "SELECT * FROM $table WHERE $w $order";
-        }
-
-        if ($count != null) {
-            $sql = $sql . " limit $from, $count";
-        }
-
-        $res = $this->query($sql);
-        // $i = 0;
-
-        return $this->toArray($res);
-        /*
-          while($row = mysql_fetch_array($res, MYSQL_ASSOC)){
-          $j=0;
-          foreach($row as $k=>$v){
-          $r[$i][$k] = $v;
-          $j++;
-          }
-          $i++;
-          }
-          return $r;
-         * 
-         */
-    }
-
-    /** MySQL result to array */
-    function toArray($res) {
-        //$res = db_execute($sql);
-        $i = 0;
-        $r = null;
-        while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
-            $j = 0;
-            foreach ($row as $k => $v) {
-                if (!$this->_usehtmlentities) {
-                    $r[$i][$k] = $v;
-                } else {
-                    $r[$i][$k] = htmlspecialchars($v);
-                }
-                $j++;
-                //echo $v . "<br>";
-            }
-            $i++;
-        }
-        return $r;
-    }
-    
-    function searchold2($term, $where = null, $onCols = null, $from=0, $count=20) {
-        $term = explode(" ", $term);
-        $terms = array();
-        foreach($term as $v){
-            array_push($terms, trim($v));
-        }
-        if($onCols == null){
-            $onCols = $this->getColumns();
-        }
-
-    }
-
-    /** Search - nao implementado */
-    function searchold($term, $where = null, $onCols = null, $from, $count) {
-        
-        if($onCols == null){
-            $onCols = $this->getColumns();
-            /*
-            foreach($myCols as $v){
-                $myCols = $myCols . ','.$v;
-            }
-            $onCols = substr($myCols,1);
-            * */
-        }
-        $first = true;
-        $table = $this->_table;
-        $w = "";
-        if ($where != null) {
-            foreach ($where as $k => $v) {
-                if ($first) {
-                    $w = $k . "=" . "\"" . $v . "\"";
-                    $first = false;
-                } else {
-                    $w = $w . " AND " . $k . "=" . "\"" . $v . "\"";
-                }
-            }
-        }
-        if ($where == null) {
-            $sql = "SELECT * FROM $table";
-        } else {
-            $sql = "SELECT *  FROM $table WHERE $w";
-        }
-
-        $s = "";
-        $first = true;
-
-        foreach ($onCols as $k => $v) {
-
-            foreach ($term as $l => $m) {
-
-                if ($first) {
-                    $s = $s . " $v LIKE '%$m%' ";
-                    $first = false;
-                } else {
-                    $s = $s . " OR $v LIKE '%$m%' ";
-                }
-            }
-        }
-        if ($s != "") {
-            $sql = $sql . " AND( " . $s . ")";
-        }
-
-
-        $tcount = count($this->toArray($this->query($sql)));
-        if ($count != null) {
-            $sql = $sql . " limit $from, $count";
-        }
-
-
-        $r = $this->toArray($this->query($sql));
-        $r["count"] = $tcount;
-        return $r;
-    }
-
-    /** Num of rows. */
-    /*
-    function getNumRows($res) {
-        return mysqli_num_rows($res);
-    }
-*/
-    function getRow($result) {
-        //$row = mysqli_fetch_array($result, MYSQLI_ASSOC);
-        $row = $result->fetchArray(SQLITE3_ASSOC);
-        return $row;
+        return $result->fetch();
     }
 
 }
