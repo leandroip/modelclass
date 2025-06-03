@@ -44,6 +44,8 @@ class ModelMYSQL {
     protected $_proptype; ///< the type of each col
     protected $editing = false;
     protected $generateId = true;
+    protected $_model; ///< The model name
+    protected $_table; ///< The table name
     private $lastSql = "";
 
     public function setGenerateId($v){
