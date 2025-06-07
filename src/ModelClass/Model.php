@@ -45,8 +45,8 @@ class Model {
         return $columns;
     }
 
-    public function insert(array $data = null) {
-        if ($data == null) {
+    public function insert(array $data = []) {
+        if (empty($data)) {
             $data = $this->data;
         }
         $validColumns = $this->getTableColumns();
@@ -80,6 +80,7 @@ class Model {
         }
     
         $stmt->execute();
+        $this->data = $data;
         //return self::$pdo->lastInsertId();
         return true;
     }
